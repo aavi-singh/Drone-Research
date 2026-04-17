@@ -66,123 +66,8 @@ def evaluate_coverage(orientations, num_arms=4, prop_radius=70, eval_radius=300,
     M = len(pts_unit)
     cov_counts = np.zeros(M, dtype=int)
 
-    def _ray_hits_body(origin, target):
-        d = target - origin
-        d_len = np.linalg.norm(d)
-        if d_len < 1e-9:
-            return False
-        d_hat = d / d_len
-        EPS = 1.0
-        if body_shape == 'Cylinder':
-            a = d_hat[0]**2 + d_hat[1]**2
-            b = 2*(origin[0]*d_hat[0] + origin[1]*d_hat[1])
-            c = origin[0]**2 + origin[1]**2 - hub_radius**2
-            disc = b**2 - 4*a*c
-            if disc >= 0 and a > 1e-12:
-                sq = math.sqrt(disc)
-                for t in [(-b - sq)/(2*a), (-b + sq)/(2*a)]:
-                    if EPS < t < d_len:
-                        z_hit = origin[2] + t*d_hat[2]
-                        if abs(z_hit) <= hub_height:
-                            return True
-            for z_cap in [-hub_height, hub_height]:
-                if abs(d_hat[2]) > 1e-9:
-                    t = (z_cap - origin[2]) / d_hat[2]
-                    if EPS < t < d_len:
-                        hx = origin[0] + t*d_hat[0]
-                        hy = origin[1] + t*d_hat[1]
-                        if hx**2 + hy**2 <= hub_radius**2:
-                            return True
-        elif body_shape == 'Box':
-            r, h = hub_radius, hub_height
-            for axis, lo, hi in [(0, -r, r), (1, -r, r), (2, -h, h)]:
-                if abs(d_hat[axis]) > 1e-9:
-                    for bound in [lo, hi]:
-                        t = (bound - origin[axis]) / d_hat[axis]
-                        if EPS < t < d_len:
-                            pt = origin + t * d_hat
-                            ok = True
-                            for a2, lo2, hi2 in [(0,-r,r),(1,-r,r),(2,-h,h)]:
-                                if a2 != axis and not (lo2 - 0.01 <= pt[a2] <= hi2 + 0.01):
-                                    ok = False
-                            if ok:
-                                return True
-        elif body_shape == 'Sphere':
-            r, h = hub_radius, max(hub_height, 1)
-            ox, oy, oz = origin[0]/r, origin[1]/r, origin[2]/h
-            dx, dy, dz = d_hat[0]/r, d_hat[1]/h, d_hat[2]/h
-            a = dx**2 + dy**2 + dz**2
-            b = 2*(ox*dx + oy*dy + oz*dz)
-            c = ox**2 + oy**2 + oz**2 - 1
-            disc = b**2 - 4*a*c
-            if disc >= 0 and a > 1e-12:
-                sq = math.sqrt(disc)
-                for t in [(-b - sq)/(2*a), (-b + sq)/(2*a)]:
-                    if EPS < t < d_len:
-                        return True
-        elif body_shape == 'Hexagon':
-            a = d_hat[0]**2 + d_hat[1]**2
-            b = 2*(origin[0]*d_hat[0] + origin[1]*d_hat[1])
-            c = origin[0]**2 + origin[1]**2 - hub_radius**2
-            disc = b**2 - 4*a*c
-            if disc >= 0 and a > 1e-12:
-                sq = math.sqrt(disc)
-                for t in [(-b - sq)/(2*a), (-b + sq)/(2*a)]:
-                    if EPS < t < d_len:
-                        z_hit = origin[2] + t*d_hat[2]
-                        if abs(z_hit) <= hub_height:
-                            return True
-        return False
-
-    def _surface_pos(direction):
-        d = direction / np.linalg.norm(direction)
-        dx, dy, dz = d
-        if body_shape == 'Cylinder':
-            horiz = math.sqrt(dx**2 + dy**2)
-            if horiz > 1e-9:
-                t_side = hub_radius / horiz
-                if abs(dz * t_side) <= hub_height:
-                    return d * t_side
-            if abs(dz) > 1e-9:
-                return d * (hub_height / abs(dz))
-            return d * hub_radius
-        elif body_shape == 'Box':
-            t_min = float('inf')
-            for axis, limit in [(0, hub_radius), (1, hub_radius), (2, hub_height)]:
-                if abs(d[axis]) > 1e-9:
-                    t = limit / abs(d[axis])
-                    pt = d * t
-                    ok = True
-                    for a2, l2 in [(0, hub_radius), (1, hub_radius), (2, hub_height)]:
-                        if a2 != axis and abs(pt[a2]) > l2 * 1.001:
-                            ok = False
-                    if ok and t < t_min:
-                        t_min = t
-            return d * (t_min if t_min < float('inf') else hub_radius)
-        elif body_shape == 'Sphere':
-            a2 = (dx/hub_radius)**2 + (dy/hub_radius)**2 + (dz/max(hub_height, 1))**2
-            return d * (1.0 / math.sqrt(a2) if a2 > 0 else hub_radius)
-        else:
-            t_min = float('inf')
-            for i in range(6):
-                a1 = 2*np.pi*i/6
-                a2 = 2*np.pi*(i+1)/6
-                nx = math.cos((a1+a2)/2)
-                ny = math.sin((a1+a2)/2)
-                dot = dx*nx + dy*ny
-                if dot > 1e-9:
-                    t = hub_radius / dot
-                    if t < t_min:
-                        t_min = t
-            if abs(dz) > 1e-9:
-                t_cap = hub_height / abs(dz)
-                if t_cap < t_min:
-                    t_min = t_cap
-            return d * (t_min if t_min < float('inf') else hub_radius)
-
     for yaw_deg, pitch_deg in orientations:
         fwd, right, up = get_camera_vectors(yaw_deg, pitch_deg)
-        cam_pos = _surface_pos(fwd)
         proj_fwd = pts_unit @ fwd
         proj_right = pts_unit @ right
         proj_up = pts_unit @ up
@@ -190,12 +75,6 @@ def evaluate_coverage(orientations, num_arms=4, prop_radius=70, eval_radius=300,
         ang_h = np.abs(np.arctan2(proj_right, proj_fwd))
         ang_v = np.abs(np.arctan2(proj_up, proj_fwd))
         in_fov = in_front & (ang_h < FOV_H / 2) & (ang_v < FOV_V / 2)
-
-        for pi in np.where(in_fov)[0]:
-            target = pts_unit[pi] * eval_radius
-            if _ray_hits_body(cam_pos, target):
-                in_fov[pi] = False
-
         cov_counts += in_fov.astype(int)
 
     if num_arms > 0 and prop_radius > 0:
@@ -426,70 +305,14 @@ class DroneVisionGUI:
         half_tan_h = np.tan(FOV_H / 2)
         half_tan_v = np.tan(FOV_V / 2)
 
-        def _surface_pos(fwd):
-            d = fwd / np.linalg.norm(fwd)
-            dx, dy, dz = d
-            horiz = math.sqrt(dx**2 + dy**2)
-            if horiz > 1e-9:
-                t_side = hub_r / horiz
-                if abs(dz * t_side) <= hub_h:
-                    return d * t_side
-            if abs(dz) > 1e-9:
-                return d * (hub_h / abs(dz))
-            return d * hub_r
-
-        def _vis_body(yaw_deg, pitch_deg):
+        def _vis(yaw_deg, pitch_deg):
             fwd, right, up = get_camera_vectors(yaw_deg, pitch_deg)
-            cam_pos = _surface_pos(fwd)
-
             pf = pts @ fwd
             in_front = pf > 0
             pf_safe = np.where(in_front, pf, 1.0)
             ah = np.abs((pts @ right) / pf_safe)
             av = np.abs((pts @ up) / pf_safe)
-            in_fov = in_front & (ah < half_tan_h) & (av < half_tan_v)
-
-            fov_idx = np.where(in_fov)[0]
-            if len(fov_idx) == 0:
-                return in_fov
-
-            targets = pts[fov_idx] * e_radius
-            dirs = targets - cam_pos
-            d_len = np.linalg.norm(dirs, axis=1)
-            safe_len = np.where(d_len > 0, d_len, 1.0)
-            d_hat = dirs / safe_len[:, np.newaxis]
-            EPS = 1.0
-            hit = np.zeros(len(fov_idx), dtype=bool)
-
-            a_coeff = d_hat[:, 0]**2 + d_hat[:, 1]**2
-            b_coeff = 2 * (cam_pos[0]*d_hat[:, 0] + cam_pos[1]*d_hat[:, 1])
-            c_coeff = cam_pos[0]**2 + cam_pos[1]**2 - hub_r**2
-            disc = b_coeff**2 - 4*a_coeff*c_coeff
-
-            valid = (disc >= 0) & (a_coeff > 1e-12)
-            if np.any(valid):
-                vi = np.where(valid)[0]
-                sq = np.sqrt(disc[valid])
-                inv_2a = 1.0 / (2 * a_coeff[valid])
-                for sign in [-1, 1]:
-                    t_val = (-b_coeff[valid] + sign * sq) * inv_2a
-                    in_range = (t_val > EPS) & (t_val < d_len[valid])
-                    z_at = cam_pos[2] + t_val * d_hat[vi, 2]
-                    hit[vi[in_range & (np.abs(z_at) <= hub_h)]] = True
-
-            for z_cap in [-hub_h, hub_h]:
-                dz = d_hat[:, 2]
-                vc = np.abs(dz) > 1e-9
-                if np.any(vc):
-                    vci = np.where(vc)[0]
-                    t_val = (z_cap - cam_pos[2]) / dz[vc]
-                    in_range = (t_val > EPS) & (t_val < d_len[vc])
-                    hx = cam_pos[0] + t_val * d_hat[vci, 0]
-                    hy = cam_pos[1] + t_val * d_hat[vci, 1]
-                    hit[vci[in_range & (hx**2 + hy**2 <= hub_r**2)]] = True
-
-            in_fov[fov_idx[hit]] = False
-            return in_fov
+            return in_front & (ah < half_tan_h) & (av < half_tan_v)
 
         yaw_grid = np.arange(-180, 180, 5.0)
         pitch_grid = np.arange(-90, 91, 5.0)
@@ -498,7 +321,7 @@ class DroneVisionGUI:
 
         cand_vis = np.zeros((K, M), dtype=bool)
         for ki, (y, p) in enumerate(cands):
-            cand_vis[ki] = _vis_body(y, p)
+            cand_vis[ki] = _vis(y, p)
 
         uncovered = np.ones(M, dtype=bool)
         greedy_idx = []
@@ -517,7 +340,7 @@ class DroneVisionGUI:
 
         best_ori = [cands[k] for k in greedy_idx]
 
-        vis_cache = [_vis_body(y, p) for y, p in best_ori]
+        vis_cache = [_vis(y, p) for y, p in best_ori]
         cov_counts = np.zeros(M, dtype=int)
         for v in vis_cache:
             cov_counts += v.astype(int)
@@ -540,7 +363,7 @@ class DroneVisionGUI:
             if ny < -180: ny += 360
 
             old_vis = vis_cache[ci]
-            new_vis = _vis_body(ny, npv)
+            new_vis = _vis(ny, npv)
 
             cov_counts -= old_vis.astype(int)
             cov_counts += new_vis.astype(int)
