@@ -51,7 +51,7 @@ def get_camera_vectors(yaw_deg, pitch_deg):
     return forward, right, up
 
 def evaluate_coverage(orientations, num_arms=4, prop_radius=70, eval_radius=300, pts=None,
-                      hub_radius=None, hub_height=None, arm_length=None, body_shape='Cylinder'):
+                      hub_radius=None, hub_height=None, arm_length=None):
     if hub_radius is None:
         hub_radius = HUB_RADIUS_MM
     if hub_height is None:
@@ -134,7 +134,7 @@ class DroneVisionGUI:
         self.hub_radius = tk.IntVar(value=HUB_RADIUS_MM)
         self.hub_height = tk.IntVar(value=30)
         self.arm_length = tk.IntVar(value=ARM_LENGTH_MM)
-        self.body_shape = tk.StringVar(value='Cylinder')
+
 
         self.show_body = tk.BooleanVar(value=True)
         self.show_arms = tk.BooleanVar(value=True)
@@ -174,16 +174,6 @@ class DroneVisionGUI:
 
         body_row = tk.Frame(ctrl_frame, bg=COLORS['panel'])
         body_row.pack(fill=tk.X, pady=(6, 0))
-        sf = tk.Frame(body_row, bg=COLORS['panel'])
-        sf.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
-        tk.Label(sf, text="Body Shape", font=('Inter', 8), fg=COLORS['dim'],
-                 bg=COLORS['panel']).pack(anchor='w')
-        shape_menu = tk.OptionMenu(sf, self.body_shape,
-                                   'Cylinder', 'Box', 'Sphere', 'Hexagon')
-        shape_menu.configure(font=('Inter', 9), bg=COLORS['bg'], fg=COLORS['text'],
-                            relief='flat', highlightthickness=1,
-                            highlightbackground=COLORS['border'])
-        shape_menu.pack(fill=tk.X)
         for label, var in [("Body Radius (mm)", self.hub_radius),
                            ("Body Height (mm)", self.hub_height),
                            ("Arm Length (mm)", self.arm_length)]:
@@ -298,7 +288,6 @@ class DroneVisionGUI:
         hub_r = self.hub_radius.get()
         hub_h = self.hub_height.get() // 2
         arm_l = self.arm_length.get()
-        body = self.body_shape.get()
 
         pts = generate_sphere_points(MC_SAMPLES)
         M = len(pts)
@@ -388,7 +377,7 @@ class DroneVisionGUI:
         self.analysis = evaluate_coverage(
             self.orientations, n_arms, p_radius, e_radius,
             hub_radius=hub_r, hub_height=hub_h,
-            arm_length=arm_l, body_shape=body)
+            arm_length=arm_l)
 
         self._compute_time = time.time() - t0
 
@@ -520,55 +509,17 @@ class DroneVisionGUI:
                        color='crimson', linewidth=1.2, alpha=0.7)
 
         if self.show_body.get():
-            shape = self.body_shape.get()
             bc = 'dimgray'
             ec = 'gray'
-
-            if shape == 'Cylinder':
-                theta_c = np.linspace(0, 2*np.pi, 20)
-                for zz in [-hub_h, hub_h]:
-                    ax.plot(hub_r * np.cos(theta_c), hub_r * np.sin(theta_c),
-                            np.full(len(theta_c), zz), color=ec, linewidth=1.2, alpha=0.7)
-                top_v = [[hub_r*np.cos(a_), hub_r*np.sin(a_), hub_h] for a_ in theta_c]
-                bot_v = [[hub_r*np.cos(a_), hub_r*np.sin(a_), -hub_h] for a_ in theta_c]
-                ax.add_collection3d(Poly3DCollection([top_v], alpha=0.3, facecolor=bc, edgecolor=ec, linewidth=0.5))
-                ax.add_collection3d(Poly3DCollection([bot_v], alpha=0.3, facecolor=bc, edgecolor=ec, linewidth=0.5))
-                for i in range(len(theta_c) - 1):
-                    side = [top_v[i], top_v[i+1], bot_v[i+1], bot_v[i]]
-                    ax.add_collection3d(Poly3DCollection([side], alpha=0.2, facecolor=bc, edgecolor=ec, linewidth=0.3))
-
-            elif shape == 'Box':
-                r, h = hub_r, hub_h
-                corners_top = [[-r, -r, h], [r, -r, h], [r, r, h], [-r, r, h]]
-                corners_bot = [[-r, -r, -h], [r, -r, -h], [r, r, -h], [-r, r, -h]]
-                ax.add_collection3d(Poly3DCollection([corners_top], alpha=0.3, facecolor=bc, edgecolor=ec, linewidth=0.5))
-                ax.add_collection3d(Poly3DCollection([corners_bot], alpha=0.3, facecolor=bc, edgecolor=ec, linewidth=0.5))
-                for i in range(4):
-                    j = (i + 1) % 4
-                    side = [corners_top[i], corners_top[j], corners_bot[j], corners_bot[i]]
-                    ax.add_collection3d(Poly3DCollection([side], alpha=0.2, facecolor=bc, edgecolor=ec, linewidth=0.3))
-
-            elif shape == 'Sphere':
-                u = np.linspace(0, 2*np.pi, 16)
-                v = np.linspace(-np.pi/2, np.pi/2, 10)
-                for vi in range(len(v) - 1):
-                    for ui in range(len(u) - 1):
-                        quad = []
-                        for dv, du in [(vi, ui), (vi, ui+1), (vi+1, ui+1), (vi+1, ui)]:
-                            quad.append([hub_r*np.cos(v[dv])*np.cos(u[du]),
-                                        hub_r*np.cos(v[dv])*np.sin(u[du]),
-                                        hub_h*np.sin(v[dv])])
-                        ax.add_collection3d(Poly3DCollection([quad], alpha=0.15, facecolor=bc, edgecolor=ec, linewidth=0.2))
-
-            elif shape == 'Hexagon':
-                theta_c = np.linspace(0, 2*np.pi, 7)
-                top_v = [[hub_r*np.cos(a_), hub_r*np.sin(a_), hub_h] for a_ in theta_c]
-                bot_v = [[hub_r*np.cos(a_), hub_r*np.sin(a_), -hub_h] for a_ in theta_c]
-                ax.add_collection3d(Poly3DCollection([top_v], alpha=0.3, facecolor=bc, edgecolor=ec, linewidth=0.5))
-                ax.add_collection3d(Poly3DCollection([bot_v], alpha=0.3, facecolor=bc, edgecolor=ec, linewidth=0.5))
-                for i in range(6):
-                    side = [top_v[i], top_v[i+1], bot_v[i+1], bot_v[i]]
-                    ax.add_collection3d(Poly3DCollection([side], alpha=0.2, facecolor=bc, edgecolor=ec, linewidth=0.3))
+            r, h = hub_r, hub_h
+            corners_top = [[-r, -r, h], [r, -r, h], [r, r, h], [-r, r, h]]
+            corners_bot = [[-r, -r, -h], [r, -r, -h], [r, r, -h], [-r, r, -h]]
+            ax.add_collection3d(Poly3DCollection([corners_top], alpha=0.3, facecolor=bc, edgecolor=ec, linewidth=0.5))
+            ax.add_collection3d(Poly3DCollection([corners_bot], alpha=0.3, facecolor=bc, edgecolor=ec, linewidth=0.5))
+            for i in range(4):
+                j = (i + 1) % 4
+                side = [corners_top[i], corners_top[j], corners_bot[j], corners_bot[i]]
+                ax.add_collection3d(Poly3DCollection([side], alpha=0.2, facecolor=bc, edgecolor=ec, linewidth=0.3))
 
         if num_arms > 0 and self.show_arms.get():
             for arm in range(num_arms):
@@ -582,55 +533,21 @@ class DroneVisionGUI:
                             np.zeros(12), color='orangered', linewidth=1, alpha=0.5)
 
         cam_color = (0.2, 0.7, 0.3)
-        shape = self.body_shape.get()
 
         def _surface_point(direction):
             d = direction / np.linalg.norm(direction)
-            dx, dy, dz = d
-            if shape == 'Cylinder':
-                horiz = math.sqrt(dx**2 + dy**2)
-                if horiz > 1e-9:
-                    t_side = hub_r / horiz
-                    if abs(dz * t_side) <= hub_h:
-                        return d * t_side
-                if abs(dz) > 1e-9:
-                    return d * (hub_h / abs(dz))
-                return d * hub_r
-            elif shape == 'Box':
-                t_min = float('inf')
-                for axis, limit in [(0, hub_r), (1, hub_r), (2, hub_h)]:
-                    if abs(d[axis]) > 1e-9:
-                        t = limit / abs(d[axis])
-                        pt = d * t
-                        ok = True
-                        for a2, l2 in [(0, hub_r), (1, hub_r), (2, hub_h)]:
-                            if a2 != axis and abs(pt[a2]) > l2 * 1.001:
-                                ok = False
-                        if ok and t < t_min:
-                            t_min = t
-                return d * (t_min if t_min < float('inf') else hub_r)
-            elif shape == 'Sphere':
-                a2 = (dx/hub_r)**2 + (dy/hub_r)**2 + (dz/max(hub_h, 1))**2
-                t = 1.0 / math.sqrt(a2) if a2 > 0 else hub_r
-                return d * t
-            elif shape == 'Hexagon':
-                t_min = float('inf')
-                for i in range(6):
-                    a1 = 2*np.pi*i/6
-                    a2 = 2*np.pi*(i+1)/6
-                    nx = math.cos((a1+a2)/2)
-                    ny = math.sin((a1+a2)/2)
-                    dot = dx*nx + dy*ny
-                    if dot > 1e-9:
-                        t = hub_r / dot
-                        if t < t_min:
-                            t_min = t
-                if abs(dz) > 1e-9:
-                    t_cap = hub_h / abs(dz)
-                    if t_cap < t_min:
-                        t_min = t_cap
-                return d * (t_min if t_min < float('inf') else hub_r)
-            return d * hub_r
+            t_min = float('inf')
+            for axis, limit in [(0, hub_r), (1, hub_r), (2, hub_h)]:
+                if abs(d[axis]) > 1e-9:
+                    t = limit / abs(d[axis])
+                    pt = d * t
+                    ok = True
+                    for a2, l2 in [(0, hub_r), (1, hub_r), (2, hub_h)]:
+                        if a2 != axis and abs(pt[a2]) > l2 * 1.001:
+                            ok = False
+                    if ok and t < t_min:
+                        t_min = t
+            return d * (t_min if t_min < float('inf') else hub_r)
 
         for ci, (yaw, pitch) in enumerate(self.orientations):
             if ci < len(self.cam_visible) and not self.cam_visible[ci].get():
