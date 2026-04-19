@@ -11,13 +11,13 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-HUB_RADIUS_MM   = 50
+HUB_RADIUS_MM   = 100
 ARM_LENGTH_MM   = 150
 FOV_H_DEG       = 55
 FOV_V_DEG       = 70
 FOV_H           = np.radians(FOV_H_DEG)
 FOV_V           = np.radians(FOV_V_DEG)
-MC_SAMPLES      = 3000
+MC_SAMPLES      = 50000
 SOLID_ANGLE_CAM = 4 * np.arcsin(np.sin(FOV_H/2) * np.sin(FOV_V/2))
 FULL_SPHERE_SR  = 4 * np.pi
 
@@ -50,6 +50,73 @@ def get_camera_vectors(yaw_deg, pitch_deg):
     up /= np.linalg.norm(up)
     return forward, right, up
 
+def camera_surface_point(fwd, hub_radius, hub_half_h):
+    """Place camera on the exterior body face most aligned with its pointing direction.
+    
+    For a rectangular body (±hub_radius on X/Y, ±hub_half_h on Z):
+    - Determines which of the 6 box faces the camera should mount on
+      (the face whose outward normal best aligns with the camera forward)
+    - Places the camera at that face, offset from center based on the
+      remaining direction components so it sits where you'd physically mount it
+    """
+    d = fwd / np.linalg.norm(fwd)
+    
+    # The 6 face normals and their limits
+    faces = [
+        (np.array([ 1, 0, 0]), hub_radius),   # +X face
+        (np.array([-1, 0, 0]), hub_radius),   # -X face
+        (np.array([ 0, 1, 0]), hub_radius),   # +Y face
+        (np.array([ 0,-1, 0]), hub_radius),   # -Y face
+        (np.array([ 0, 0, 1]), hub_half_h),   # +Z (top) face
+        (np.array([ 0, 0,-1]), hub_half_h),   # -Z (bottom) face
+    ]
+    
+    # Pick the face whose normal is most aligned with camera direction
+    best_dot = -1
+    best_face = None
+    for normal, dist in faces:
+        alignment = np.dot(d, normal)
+        if alignment > best_dot:
+            best_dot = alignment
+            best_face = (normal, dist)
+    
+    normal, dist = best_face
+    
+    # Camera sits on this face at distance 'dist' along the normal
+    # Plus an offset on the face plane based on remaining direction components
+    # Find which axes are "on the face" (perpendicular to normal)
+    pos = normal * dist
+    
+    # Project remaining direction onto the face to determine position on face
+    face_tangent = d - np.dot(d, normal) * normal  # component parallel to face
+    ft_len = np.linalg.norm(face_tangent)
+    
+    if ft_len > 1e-9:
+        face_tangent /= ft_len
+        # Determine face extent in the tangent direction
+        # Clamp to face boundaries
+        limits = np.array([hub_radius, hub_radius, hub_half_h])
+        # How far we can go in tangent direction while staying on face
+        max_offset = 0
+        for ax in range(3):
+            if abs(normal[ax]) > 0.5:
+                continue  # this is the face normal axis, skip
+            if abs(face_tangent[ax]) > 1e-9:
+                max_off = limits[ax] / abs(face_tangent[ax])
+                if max_offset == 0 or max_off < max_offset:
+                    max_offset = max_off
+        
+        # Push camera toward the edge based on the pitch/direction — use 80% of max
+        offset_amount = max_offset * 0.8 * ft_len
+        pos = pos + face_tangent * offset_amount
+        
+        # Clamp to face boundaries
+        pos[0] = np.clip(pos[0], -hub_radius, hub_radius)
+        pos[1] = np.clip(pos[1], -hub_radius, hub_radius)
+        pos[2] = np.clip(pos[2], -hub_half_h, hub_half_h)
+    
+    return pos
+
 def evaluate_coverage(orientations, num_arms=4, prop_radius=70, eval_radius=300, pts=None,
                       hub_radius=None, hub_height=None, arm_length=None):
     if hub_radius is None:
@@ -68,9 +135,16 @@ def evaluate_coverage(orientations, num_arms=4, prop_radius=70, eval_radius=300,
 
     for yaw_deg, pitch_deg in orientations:
         fwd, right, up = get_camera_vectors(yaw_deg, pitch_deg)
-        proj_fwd = pts_unit @ fwd
-        proj_right = pts_unit @ right
-        proj_up = pts_unit @ up
+        cam_pos = camera_surface_point(fwd, hub_radius, hub_height / 2)
+        # Compute vector from camera position to each sphere point
+        pts_world = pts_unit * eval_radius
+        to_pts = pts_world - cam_pos  # (M, 3)
+        dists = np.linalg.norm(to_pts, axis=1, keepdims=True)
+        to_pts_norm = to_pts / np.maximum(dists, 1e-9)
+        # Check if each point falls within the camera's FOV
+        proj_fwd = to_pts_norm @ fwd
+        proj_right = to_pts_norm @ right
+        proj_up = to_pts_norm @ up
         in_front = proj_fwd > 0
         ang_h = np.abs(np.arctan2(proj_right, proj_fwd))
         ang_v = np.abs(np.arctan2(proj_up, proj_fwd))
@@ -81,7 +155,7 @@ def evaluate_coverage(orientations, num_arms=4, prop_radius=70, eval_radius=300,
         for arm in range(num_arms):
             angle = 2 * np.pi * arm / num_arms
             arm_dir = np.array([np.cos(angle), np.sin(angle), 0])
-            arm_center = arm_dir * arm_length
+            arm_center = arm_dir * (hub_radius + arm_length)
             for pt_idx in range(M):
                 if cov_counts[pt_idx] == 0:
                     continue
@@ -126,13 +200,13 @@ class DroneVisionGUI:
         self.total_cameras = tk.IntVar(value=16)
         self.num_arms = tk.IntVar(value=4)
         self.prop_radius = tk.IntVar(value=70)
-        self.eval_radius = tk.IntVar(value=300)
+        self.eval_radius = tk.IntVar(value=2000)
         self.orientations = []
         self.analysis = None
         self._computing = False
 
         self.hub_radius = tk.IntVar(value=HUB_RADIUS_MM)
-        self.hub_height = tk.IntVar(value=30)
+        self.hub_height = tk.IntVar(value=50)
         self.arm_length = tk.IntVar(value=ARM_LENGTH_MM)
 
 
@@ -140,6 +214,7 @@ class DroneVisionGUI:
         self.show_arms = tk.BooleanVar(value=True)
         self.show_propellers = tk.BooleanVar(value=True)
         self.show_blind = tk.BooleanVar(value=True)
+        self.show_dims = tk.BooleanVar(value=True)
         self.cam_visible = []
 
         style = ttk.Style()
@@ -185,6 +260,7 @@ class DroneVisionGUI:
                         bg=COLORS['bg'], fg=COLORS['text'], relief='flat',
                         highlightbackground=COLORS['border'], highlightthickness=1)
             e.pack(fill=tk.X)
+            var.trace_add('write', lambda *args: self._schedule_redraw())
 
         btn_frame = tk.Frame(ctrl_frame, bg=COLORS['panel'])
         btn_frame.pack(fill=tk.X, pady=(6, 0))
@@ -225,7 +301,8 @@ class DroneVisionGUI:
         toggle_row = tk.Frame(side_frame, bg=COLORS['panel'])
         toggle_row.pack(fill=tk.X, pady=(2, 6))
         for text, var in [("Body", self.show_body), ("Arms", self.show_arms),
-                          ("Props", self.show_propellers), ("Blind", self.show_blind)]:
+                          ("Props", self.show_propellers), ("Blind", self.show_blind),
+                          ("Dims", self.show_dims)]:
             cb = tk.Checkbutton(toggle_row, text=text, variable=var,
                                fg=COLORS['text'], bg=COLORS['panel'], selectcolor=COLORS['border'],
                                activebackground=COLORS['panel'], font=('Inter', 8),
@@ -293,14 +370,18 @@ class DroneVisionGUI:
         M = len(pts)
         half_tan_h = np.tan(FOV_H / 2)
         half_tan_v = np.tan(FOV_V / 2)
+        pts_world = pts * e_radius  # precompute world positions once
 
         def _vis(yaw_deg, pitch_deg):
             fwd, right, up = get_camera_vectors(yaw_deg, pitch_deg)
-            pf = pts @ fwd
+            cam_pos = camera_surface_point(fwd, hub_r, hub_h)
+            to_pts = pts_world - cam_pos
+            # Project onto camera axes (no need to normalize — use ratios)
+            pf = to_pts @ fwd
             in_front = pf > 0
             pf_safe = np.where(in_front, pf, 1.0)
-            ah = np.abs((pts @ right) / pf_safe)
-            av = np.abs((pts @ up) / pf_safe)
+            ah = np.abs((to_pts @ right) / pf_safe)
+            av = np.abs((to_pts @ up) / pf_safe)
             return in_front & (ah < half_tan_h) & (av < half_tan_v)
 
         yaw_grid = np.arange(-180, 180, 5.0)
@@ -339,7 +420,7 @@ class DroneVisionGUI:
         cur_ori = list(best_ori)
         cur_cov = best_cov
         T = 12.0
-        n_sa = 3000
+        n_sa = 100000
         alpha_sa = (0.005 / 12.0) ** (1.0 / n_sa)
 
         for it in range(n_sa):
@@ -431,7 +512,7 @@ class DroneVisionGUI:
         cov_color = COLORS['green'] if a['total_coverage'] > 98 else COLORS['gold'] if a['total_coverage'] > 90 else COLORS['red']
 
         self._make_metric_card(self.metrics_frame, "Coverage",
-                               f"{a['total_coverage']:.1f}%", cov_color, "of full sphere")
+                               f"{a['total_coverage']:.2f}%", cov_color, "of full sphere")
         self._make_metric_card(self.metrics_frame, "Blind Spots",
                                f"{a['blind_spots']}", blind_color,
                                "ZERO" if a['blind_spots'] == 0 else "remaining gaps")
@@ -440,6 +521,19 @@ class DroneVisionGUI:
         self._make_metric_card(self.metrics_frame, "Cameras",
                                f"{len(self.orientations)}", COLORS['optimizer'],
                                self._method_label)
+
+    def _schedule_redraw(self):
+        """Debounced redraw — waits 300ms after last change before redrawing."""
+        if hasattr(self, '_redraw_timer') and self._redraw_timer is not None:
+            self.root.after_cancel(self._redraw_timer)
+        self._redraw_timer = self.root.after(300, self._safe_redraw)
+
+    def _safe_redraw(self):
+        """Redraw with error handling for partial input in entry fields."""
+        try:
+            self._redraw_3d()
+        except (tk.TclError, ValueError):
+            pass  # Ignore errors from empty/partial entry fields
 
     def _update_3d(self, a):
         try:
@@ -451,6 +545,12 @@ class DroneVisionGUI:
         if not hasattr(self, '_zoom'):
             self._zoom = 1.0
 
+        # Disconnect old event handlers to prevent stacking
+        if hasattr(self, '_cids'):
+            for cid in self._cids:
+                self.canvas_3d.mpl_disconnect(cid)
+        self._cids = []
+
         self.fig_3d.clear()
         ax = self.fig_3d.add_subplot(111, projection='3d', facecolor=COLORS['bg'])
         self.ax_3d = ax
@@ -459,8 +559,8 @@ class DroneVisionGUI:
 
         self._drag_start = None
         def _on_press(event):
-            if event.inaxes == ax and event.button == 1:
-                self._drag_start = (event.x, event.y, ax.elev, ax.azim)
+            if event.inaxes == self.ax_3d and event.button == 1:
+                self._drag_start = (event.x, event.y, self.ax_3d.elev, self.ax_3d.azim)
         def _on_release(event):
             self._drag_start = None
         def _on_drag(event):
@@ -472,12 +572,12 @@ class DroneVisionGUI:
             sensitivity = 0.3
             new_azim = azim0 - dx * sensitivity
             new_elev = max(-80, min(80, elev0 + dy * sensitivity))
-            ax.view_init(elev=new_elev, azim=new_azim)
+            self.ax_3d.view_init(elev=new_elev, azim=new_azim)
             self.canvas_3d.draw_idle()
 
-        self.canvas_3d.mpl_connect('button_press_event', _on_press)
-        self.canvas_3d.mpl_connect('button_release_event', _on_release)
-        self.canvas_3d.mpl_connect('motion_notify_event', _on_drag)
+        self._cids.append(self.canvas_3d.mpl_connect('button_press_event', _on_press))
+        self._cids.append(self.canvas_3d.mpl_connect('button_release_event', _on_release))
+        self._cids.append(self.canvas_3d.mpl_connect('motion_notify_event', _on_drag))
 
         eval_r = self.eval_radius.get()
         num_arms = self.num_arms.get()
@@ -524,9 +624,12 @@ class DroneVisionGUI:
         if num_arms > 0 and self.show_arms.get():
             for arm in range(num_arms):
                 angle = 2 * np.pi * arm / num_arms
-                ex = arm_l * np.cos(angle)
-                ey = arm_l * np.sin(angle)
-                ax.plot([0, ex], [0, ey], [0, 0], color='gray', linewidth=2, alpha=0.6)
+                # Arm starts at body edge, extends outward
+                sx = hub_r * np.cos(angle)  # start at body edge
+                sy = hub_r * np.sin(angle)
+                ex = (hub_r + arm_l) * np.cos(angle)  # motor at body edge + arm length
+                ey = (hub_r + arm_l) * np.sin(angle)
+                ax.plot([sx, ex], [sy, ey], [0, 0], color='gray', linewidth=2, alpha=0.6)
                 if prop_r > 0 and self.show_propellers.get():
                     pc = np.linspace(0, 2*np.pi, 12)
                     ax.plot(ex + prop_r*np.cos(pc), ey + prop_r*np.sin(pc),
@@ -535,50 +638,160 @@ class DroneVisionGUI:
         cam_color = (0.2, 0.7, 0.3)
 
         def _surface_point(direction):
-            d = direction / np.linalg.norm(direction)
-            t_min = float('inf')
-            for axis, limit in [(0, hub_r), (1, hub_r), (2, hub_h)]:
-                if abs(d[axis]) > 1e-9:
-                    t = limit / abs(d[axis])
-                    pt = d * t
-                    ok = True
-                    for a2, l2 in [(0, hub_r), (1, hub_r), (2, hub_h)]:
-                        if a2 != axis and abs(pt[a2]) > l2 * 1.001:
-                            ok = False
-                    if ok and t < t_min:
-                        t_min = t
-            return d * (t_min if t_min < float('inf') else hub_r)
+            return camera_surface_point(direction, hub_r, hub_h)
 
         for ci, (yaw, pitch) in enumerate(self.orientations):
-            if ci < len(self.cam_visible) and not self.cam_visible[ci].get():
-                continue
             fwd, right, up = get_camera_vectors(yaw, pitch)
             cam_pos = _surface_point(fwd)
 
+            # Camera dot — always visible
             ax.scatter(*cam_pos, c=[cam_color], s=45, zorder=5,
                       edgecolors='darkslategray', linewidths=0.6, depthshade=False)
+            # Camera label
+            label_dir = fwd * hub_r * 0.4
+            ax.text(cam_pos[0]+label_dir[0], cam_pos[1]+label_dir[1], cam_pos[2]+label_dir[2],
+                    f'C{ci+1}', fontsize=5, color='darkslategray', fontweight='bold',
+                    ha='center', va='center', zorder=6)
 
-            fl = eval_r
-            hw = fl * math.tan(FOV_H / 2)
-            vw = fl * math.tan(FOV_V / 2)
-            fc = cam_pos + fwd * fl
-            c0 = fc + right*hw + up*vw
-            c1 = fc - right*hw + up*vw
-            c2 = fc - right*hw - up*vw
-            c3 = fc + right*hw - up*vw
+            # FOV pyramid — only when camera checkbox is checked
+            show_pyramid = ci >= len(self.cam_visible) or self.cam_visible[ci].get()
+            if show_pyramid:
+                fl = eval_r
+                hw = fl * math.tan(FOV_H / 2)
+                vw = fl * math.tan(FOV_V / 2)
+                fc = cam_pos + fwd * fl
+                c0 = fc + right*hw + up*vw
+                c1 = fc - right*hw + up*vw
+                c2 = fc - right*hw - up*vw
+                c3 = fc + right*hw - up*vw
 
-            faces = [
-                [cam_pos, c0, c1], [cam_pos, c1, c2],
-                [cam_pos, c2, c3], [cam_pos, c3, c0],
-                [c0, c1, c2, c3],
-            ]
-            poly = Poly3DCollection(faces, alpha=0.2, facecolor=cam_color,
-                                     edgecolor=(*cam_color, 0.4), linewidth=0.5)
-            ax.add_collection3d(poly)
+                faces = [
+                    [cam_pos, c0, c1], [cam_pos, c1, c2],
+                    [cam_pos, c2, c3], [cam_pos, c3, c0],
+                    [c0, c1, c2, c3],
+                ]
+                poly = Poly3DCollection(faces, alpha=0.2, facecolor=cam_color,
+                                         edgecolor=(*cam_color, 0.4), linewidth=0.5)
+                ax.add_collection3d(poly)
 
-            for corner in [c0, c1, c2, c3]:
-                ax.plot([cam_pos[0], corner[0]], [cam_pos[1], corner[1]], [cam_pos[2], corner[2]],
-                       color=cam_color, alpha=0.3, linewidth=0.6)
+                for corner in [c0, c1, c2, c3]:
+                    ax.plot([cam_pos[0], corner[0]], [cam_pos[1], corner[1]], [cam_pos[2], corner[2]],
+                           color=cam_color, alpha=0.3, linewidth=0.6)
+
+        # ─── DIMENSION ANNOTATIONS ───
+        if self.show_dims.get():
+            dim_color = '#1a73e8'
+            dim_font = 6
+            dim_lw = 1.0
+            dim_alpha = 0.85
+            offset = hub_r * 0.35  # offset for dimension lines
+
+            def _dim_line(p1, p2, label, side_offset=None, font_size=None):
+                """Draw a measurement line between two 3D points with a label."""
+                fs = font_size or dim_font
+                p1 = np.array(p1, dtype=float)
+                p2 = np.array(p2, dtype=float)
+                # Line
+                ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]],
+                        color=dim_color, linewidth=dim_lw, alpha=dim_alpha,
+                        linestyle='--')
+                # End ticks (small perpendicular marks)
+                for pt in [p1, p2]:
+                    ax.scatter(*pt, c=[dim_color], s=12, zorder=6,
+                              marker='|', linewidths=0.8)
+                # Label at midpoint
+                mid = (p1 + p2) / 2
+                if side_offset is not None:
+                    mid = mid + np.array(side_offset, dtype=float)
+                ax.text(mid[0], mid[1], mid[2], label,
+                        fontsize=fs, color=dim_color, fontweight='bold',
+                        ha='center', va='center',
+                        bbox=dict(boxstyle='round,pad=0.15', facecolor='white',
+                                  edgecolor=dim_color, alpha=0.85, linewidth=0.5))
+
+            # --- Body width (front edge, top face) ---
+            _dim_line([-hub_r, -hub_r, hub_h + offset],
+                      [hub_r, -hub_r, hub_h + offset],
+                      f'{int(hub_r*2)}mm',
+                      side_offset=[0, -offset*0.5, offset*0.3])
+            # Tie-lines from edge to dimension line
+            ax.plot([-hub_r, -hub_r], [-hub_r, -hub_r], [hub_h, hub_h + offset],
+                    color=dim_color, linewidth=0.5, alpha=0.5)
+            ax.plot([hub_r, hub_r], [-hub_r, -hub_r], [hub_h, hub_h + offset],
+                    color=dim_color, linewidth=0.5, alpha=0.5)
+
+            # --- Body height (front-right edge) ---
+            _dim_line([hub_r + offset, -hub_r, -hub_h],
+                      [hub_r + offset, -hub_r, hub_h],
+                      f'{int(hub_h*2)}mm',
+                      side_offset=[offset*0.6, 0, 0])
+            ax.plot([hub_r, hub_r + offset], [-hub_r, -hub_r], [hub_h, hub_h],
+                    color=dim_color, linewidth=0.5, alpha=0.5)
+            ax.plot([hub_r, hub_r + offset], [-hub_r, -hub_r], [-hub_h, -hub_h],
+                    color=dim_color, linewidth=0.5, alpha=0.5)
+
+            # --- Arm lengths ---
+            if num_arms > 0:
+                # Label first arm only to avoid clutter
+                angle0 = 0
+                sx0 = hub_r * np.cos(angle0)
+                sy0 = hub_r * np.sin(angle0)
+                ex0 = (hub_r + arm_l) * np.cos(angle0)
+                ey0 = (hub_r + arm_l) * np.sin(angle0)
+                _dim_line([sx0, sy0, -offset * 0.8],
+                          [ex0, ey0, -offset * 0.8],
+                          f'Arm {int(arm_l)}mm',
+                          side_offset=[0, -offset*0.8, -offset*0.3])
+
+            # --- Propeller diameter (first prop) ---
+            if num_arms > 0 and prop_r > 0:
+                angle0 = 0
+                cx = (hub_r + arm_l) * np.cos(angle0)
+                cy = (hub_r + arm_l) * np.sin(angle0)
+                _dim_line([cx - prop_r, cy, offset * 0.6],
+                          [cx + prop_r, cy, offset * 0.6],
+                          f'Prop ⌀{int(prop_r*2)}mm',
+                          side_offset=[0, -offset*0.5, offset*0.4])
+
+            # --- Camera-to-camera distances (nearest neighbor for each) ---
+            all_cams = []
+            for ci2, (yaw2, pitch2) in enumerate(self.orientations):
+                fwd2, _, _ = get_camera_vectors(yaw2, pitch2)
+                pos2 = _surface_point(fwd2)
+                all_cams.append((ci2, pos2))
+
+            if len(all_cams) >= 2:
+                # Find nearest neighbor for each camera, draw unique pairs
+                drawn_pairs = set()
+                for i_idx, (ci_a, pos_a) in enumerate(all_cams):
+                    best_dist = float('inf')
+                    best_j = -1
+                    for j_idx, (ci_b, pos_b) in enumerate(all_cams):
+                        if i_idx == j_idx:
+                            continue
+                        d = np.linalg.norm(pos_a - pos_b)
+                        if d < best_dist:
+                            best_dist = d
+                            best_j = j_idx
+                    if best_j >= 0:
+                        pair = tuple(sorted([i_idx, best_j]))
+                        if pair not in drawn_pairs:
+                            drawn_pairs.add(pair)
+                            pos_b = all_cams[best_j][1]
+                            ci_b = all_cams[best_j][0]
+                            mid = (pos_a + pos_b) / 2
+                            # Offset label outward from center
+                            outward = mid / (np.linalg.norm(mid) + 1e-9) * offset * 0.6
+                            ax.plot([pos_a[0], pos_b[0]], [pos_a[1], pos_b[1]],
+                                    [pos_a[2], pos_b[2]],
+                                    color='darkorange', linewidth=0.8, alpha=0.6,
+                                    linestyle=':')
+                            ax.text(mid[0]+outward[0], mid[1]+outward[1], mid[2]+outward[2],
+                                    f'{best_dist:.0f}mm',
+                                    fontsize=5, color='darkorange', fontweight='bold',
+                                    ha='center', va='center',
+                                    bbox=dict(boxstyle='round,pad=0.1', facecolor='white',
+                                              edgecolor='darkorange', alpha=0.8, linewidth=0.4))
 
         L = eval_r * 1.0
 
@@ -616,26 +829,26 @@ class DroneVisionGUI:
 
         def on_scroll(event):
             if event.button == 'up':
-                self._zoom = min(5.0, self._zoom * 1.15)
+                self._zoom = min(30.0, self._zoom * 1.1)
             else:
-                self._zoom = max(0.3, self._zoom / 1.15)
+                self._zoom = max(0.2, self._zoom / 1.1)
             lim = eval_r * 1.05 / self._zoom
-            ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim); ax.set_zlim(-lim, lim)
+            self.ax_3d.set_xlim(-lim, lim); self.ax_3d.set_ylim(-lim, lim); self.ax_3d.set_zlim(-lim, lim)
             self.canvas_3d.draw_idle()
 
         def on_key(event):
             if event.key in ('+', '='):
-                self._zoom = min(5.0, self._zoom * 1.2)
+                self._zoom = min(30.0, self._zoom * 1.15)
             elif event.key in ('-', '_'):
-                self._zoom = max(0.3, self._zoom / 1.2)
+                self._zoom = max(0.2, self._zoom / 1.15)
             else:
                 return
             lim = eval_r * 1.05 / self._zoom
-            ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim); ax.set_zlim(-lim, lim)
+            self.ax_3d.set_xlim(-lim, lim); self.ax_3d.set_ylim(-lim, lim); self.ax_3d.set_zlim(-lim, lim)
             self.canvas_3d.draw_idle()
 
-        self.canvas_3d.mpl_connect('scroll_event', on_scroll)
-        self.canvas_3d.mpl_connect('key_press_event', on_key)
+        self._cids.append(self.canvas_3d.mpl_connect('scroll_event', on_scroll))
+        self._cids.append(self.canvas_3d.mpl_connect('key_press_event', on_key))
 
         self.fig_3d.tight_layout(pad=0.5)
         self.canvas_3d.draw()
